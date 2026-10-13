@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+    <title>坐姿检测</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f0f2f5;
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            box-sizing: border-box;
+        }
+        h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 15px;
+        }
+        .container {
+            position: relative;
+            width: 640px;
+            max-width: 95vw;
+            border-radius: 16px;
+            overflow: hidden;
+            background: #000;
+            aspect-ratio: 4/3;
+        }
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        #status {
+            margin-top: 15px;
+            padding: 14px 28px;
+            border-radius: 40px;
+            font-size: 22px;
+            font-weight: 600;
+            text-align: center;
+            transition: all 0.3s ease;
+            background: #e8f5e9;
+            color: #2e7d32;
+            min-width: 240px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .bad { background: #ffebee; color: #c62828; }
+        .warning { background: #fff8e1; color: #ef6c00; }
+        .info { background: #e3f2fd; color: #1565c0; }
+
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 12px 36px;
+            font-size: 17px;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+            background: #1976d2;
+            color: white;
+            box-shadow: 0 2px 8px rgba(25,118,210,0.3);
+        }
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 16px rgba(25,118,210,0.4);
+        }
+        button.secondary {
+            background: #78909c;
+            box-shadow: 0 2px 8px rgba(120,144,156,0.3);
+        }
+        button.secondary:hover {
+            box-shadow: 0 4px 16px rgba(120,144,156,0.4);
+        }
+        .hint {
+            margin-top: 12px;
+            color: #888;
+            font-size: 13px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+<h1>🧘 坐姿检测</h1>
+
+<div class="container">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+</div>
+
+<div id="status">✅ 等待摄像头...</div>
+
+<div id="controls">
+    <button id="startBtn">▶ 开始检测</button>
+    <button id="stopBtn" class="secondary">⏹ 停止</button>
+</div>
+<div class="hint">请在光线充足的环境下，正对摄像头</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+<script>
+// ============ DOM 元素 ============
+const videoEl = document.getElementById('video');
+const canvasEl = document.getElementById('canvas');
+const ctx = canvasEl.getContext('2d');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+
+let camera = null;
+let isRunning = false;
+
+// ============ 坐姿检测函数 ============
+function checkPosture(landmarks, w, h) {
+    // 关键点索引
+    const nose = landmarks[0];
+    const leftEar = landmarks[7];
+    const rightEar = landmarks[8];
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+
+    const noseX = nose.x * w;
+    const noseY = nose.y * h;
+    const lsY = leftShoulder.y * h;
+    const rsY = rightShoulder.y * h;
+    const lsX = leftShoulder.x * w;
+    const rsX = rightShoulder.x * w;
+
+    // 1. 低头检测：鼻子到两肩中点的垂直距离
+    const shoulderMidY = (lsY + rsY) / 2;
+    const headDist = shoulderMidY - noseY;
+    const lowHead = headDist < 0.06 * h;
+
+    // 2. 歪头检测：两肩高度差
+    const shoulderDiff = Math.abs(lsY - rsY);
+    const tilted = shoulderDiff > 0.035 * h;
+
+    // 3. 距离过近：鼻子到左耳距离
+    const earX = leftEar.x * w;
+    const earY = leftEar.y * h;
+    const noseToEar = Math.sqrt((noseX - earX)**2 + (noseY - earY)**2);
+    const tooClose = noseToEar > 0.19 * w;
+
+    return { lowHead, tilted, tooClose };
+}
+
+// ============ MediaPipe Pose 回调 ============
+function onResults(results) {
+    // 清空画布
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+
+    // 先绘制视频帧（镜像）
+    ctx.save();
+    ctx.translate(canvasEl.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+    ctx.restore();
+
+    if (!results.poseLandmarks) {
+        statusEl.textContent = '👤 未检测到人体';
+        statusEl.className = 'info';
+        return;
+    }
+
+    // 绘制骨架（镜像坐标）
+    drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#00FF00', lineWidth: 2 });
+    drawLandmarks(ctx, results.poseLandmarks, { color: '#FF0000', lineWidth: 1 });
+
+    const w = canvasEl.width;
+    const h = canvasEl.height;
+    const { lowHead, tilted, tooClose } = checkPosture(results.poseLandmarks, w, h);
+
+    let text = '';
+    let cls = '';
+
+    if (lowHead && tooClose) {
+        text = '⚠️ 头太低且离太近！坐直！';
+        cls = 'bad';
+    } else if (lowHead) {
+        text = '⚠️ 低头了！抬起来';
+        cls = 'warning';
+    } else if (tilted) {
+        text = '⚠️ 身体歪了！坐正';
+        cls = 'warning';
+    } else if (tooClose) {
+        text = '⚠️ 离太近了！后退一点';
+        cls = 'info';
+    } else {
+        text = '✅ 坐姿良好';
+        cls = '';
+    }
+
+    statusEl.textContent = text;
+    statusEl.className = cls;
+}
+
+// ============ 启动 / 停止 ============
+async function startDetection() {
+    if (isRunning) return;
+    isRunning = true;
+
+    try {
+        // 设置 canvas 尺寸
+        canvasEl.width = 640;
+        canvasEl.height = 480;
+
+        // 创建 MediaPipe Pose 实例
+        const pose = new Pose({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+            }
+        });
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            smoothSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        // 创建摄像头
+        camera = new Camera(videoEl, {
+            onFrame: async () => {
+                await pose.send({ image: videoEl });
+            },
+            width: 640,
+            height: 480
+        });
+
+        await camera.start();
+        statusEl.textContent = '✅ 检测中...';
+        statusEl.className = '';
+
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = '❌ 摄像头启动失败：' + err.message;
+        statusEl.className = 'bad';
+        isRunning = false;
+    }
+}
+
+function stopDetection() {
+    if (camera) {
+        camera.stop();
+        camera = null;
+    }
+    isRunning = false;
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    statusEl.textContent = '⏸ 已停止';
+    statusEl.className = 'info';
+}
+
+// ============ 按钮事件 ============
+startBtn.addEventListener('click', startDetection);
+stopBtn.addEventListener('click', stopDetection);
+
+// ============ 页面关闭时释放资源 ============
+window.addEventListener('beforeunload', () => {
+    if (camera) camera.stop();
+});
+</script>
+</body>
+</html>
